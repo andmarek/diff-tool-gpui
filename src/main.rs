@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, ElementId, SharedString,
-    Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, CursorStyle, ElementId,
+    Pixels, SharedString, Window, WindowBounds, WindowOptions,
 };
 use similar::{ChangeTag, TextDiff};
 use std::env;
@@ -157,6 +157,22 @@ fn git_diff_files(staged: bool) -> Result<Vec<FileDiff>, String> {
 struct DiffViewer {
     diffs: Vec<FileDiff>,
     selected_index: Option<usize>,
+    panel_width: Pixels,
+}
+
+const MIN_PANEL_WIDTH: f32 = 100.0;
+const MAX_PANEL_WIDTH: f32 = 600.0;
+const DEFAULT_PANEL_WIDTH: f32 = 220.0;
+const DRAG_HANDLE_WIDTH: f32 = 4.0;
+
+struct PanelResizeDrag {
+    initial_width: Pixels,
+}
+
+impl Render for PanelResizeDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 impl DiffViewer {
@@ -169,6 +185,7 @@ impl DiffViewer {
         Self {
             diffs,
             selected_index: selected,
+            panel_width: px(DEFAULT_PANEL_WIDTH),
         }
     }
 
@@ -177,6 +194,7 @@ impl DiffViewer {
         Self {
             diffs,
             selected_index: selected,
+            panel_width: px(DEFAULT_PANEL_WIDTH),
         }
     }
 
@@ -276,7 +294,7 @@ impl DiffViewer {
         let mut panel = div()
             .flex()
             .flex_col()
-            .w(px(220.0))
+            .w(self.panel_width)
             .flex_shrink_0()
             .h_full()
             .bg(rgb(0x252526))
@@ -361,6 +379,32 @@ impl Render for DiffViewer {
                 .into_any_element()
         };
 
+        let initial_width = self.panel_width;
+
+        let drag_handle = div()
+            .id("panel-resize-handle")
+            .w(px(DRAG_HANDLE_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .bg(rgb(0x404040))
+            .hover(|style| style.bg(rgb(0x007acc)))
+            .on_drag(
+                PanelResizeDrag { initial_width },
+                |drag, _offset, _window, cx| cx.new(|_| PanelResizeDrag { initial_width: drag.initial_width }),
+            )
+            .on_drag_move::<PanelResizeDrag>(
+                cx.listener(move |this, event: &gpui::DragMoveEvent<PanelResizeDrag>, window, _cx| {
+                    let window_width = window.bounds().size.width;
+                    let mouse_x = event.event.position.x;
+                    let new_width = window_width - mouse_x - px(DRAG_HANDLE_WIDTH);
+                    let clamped = new_width
+                        .max(px(MIN_PANEL_WIDTH))
+                        .min(px(MAX_PANEL_WIDTH));
+                    this.panel_width = clamped;
+                }),
+            );
+
         div()
             .flex()
             .flex_row()
@@ -373,9 +417,12 @@ impl Render for DiffViewer {
                 div()
                     .id("diff-content")
                     .flex_grow()
+                    .min_w(px(0.0))
                     .overflow_y_scroll()
+                    .overflow_x_hidden()
                     .child(diff_content),
             )
+            .child(drag_handle)
             .child(self.render_file_panel(cx))
     }
 }
