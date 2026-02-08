@@ -1,0 +1,14 @@
+[package]
+name = "gpui-diff-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "83ca31055cf3e56aa8a704ac49e1686434f4e640" }
+
+[patch.crates-io]
+core-text = { git = "https://github.com/servo/core-foundation-rs", rev = "b10f1efc48343fc5590127ec6d890ffbb8b5bd02" }
+core-graphics = { git = "https://github.com/servo/core-foundation-rs", rev = "b10f1efc48343fc5590127ec6d890ffbb8b5bd02" }
+core-graphics-types = { git = "https://github.com/servo/core-foundation-rs", rev = "b10f1efc48343fc5590127ec6d890ffbb8b5bd02" }
+core-foundation = { git = "https://github.com/servo/core-foundation-rs", rev = "b10f1efc48343fc5590127ec6d890ffbb8b5bd02" }
+core-foundation-sys = { git = "https://github.com/servo/core-foundation-rs", rev = "b10f1efc48343fc5590127ec6d890ffbb8b5bd02" }
