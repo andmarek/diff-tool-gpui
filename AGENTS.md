@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## About
+
+A native diff viewer built with GPUI (Zed's UI framework). Currently supports opening and viewing a single file with line numbers and vertical scrolling. The goal is to evolve this into a full side-by-side diff viewer.
+
+When you add or change a major feature, update this section to reflect the current capabilities. Keep it to a few sentences.
+
 ## Build
 
 ```
