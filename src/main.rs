@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, SharedString, Window,
-    WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, ElementId, SharedString,
+    Window, WindowBounds, WindowOptions,
 };
 use similar::{ChangeTag, TextDiff};
 use std::env;
@@ -15,6 +15,7 @@ struct DiffLine {
     content: SharedString,
 }
 
+// this is a diff test
 struct FileDiff {
     old_path: SharedString,
     new_path: SharedString,
@@ -142,7 +143,12 @@ fn git_diff_files(staged: bool) -> Result<Vec<FileDiff>, String> {
             fs::read_to_string(&file_path).unwrap_or_default()
         };
 
-        diffs.push(FileDiff::from_contents(file, file, &old_content, &new_content));
+        diffs.push(FileDiff::from_contents(
+            file,
+            file,
+            &old_content,
+            &new_content,
+        ));
     }
 
     Ok(diffs)
@@ -150,19 +156,36 @@ fn git_diff_files(staged: bool) -> Result<Vec<FileDiff>, String> {
 
 struct DiffViewer {
     diffs: Vec<FileDiff>,
+    selected_index: Option<usize>,
 }
 
 impl DiffViewer {
     fn from_file_pairs(file_pairs: Vec<(String, String)>) -> Self {
-        let diffs = file_pairs
+        let diffs: Vec<FileDiff> = file_pairs
             .iter()
             .map(|(old, new)| FileDiff::from_files(old, new))
             .collect();
-        Self { diffs }
+        let selected = if diffs.is_empty() { None } else { Some(0) };
+        Self {
+            diffs,
+            selected_index: selected,
+        }
     }
 
     fn from_diffs(diffs: Vec<FileDiff>) -> Self {
-        Self { diffs }
+        let selected = if diffs.is_empty() { None } else { Some(0) };
+        Self {
+            diffs,
+            selected_index: selected,
+        }
+    }
+
+    fn file_display_name(diff: &FileDiff) -> SharedString {
+        if diff.old_path == diff.new_path {
+            diff.old_path.clone()
+        } else {
+            SharedString::from(format!("{} → {}", diff.old_path, diff.new_path))
+        }
     }
 
     fn render_diff_line(&self, line: &DiffLine, gutter_width: f32) -> impl IntoElement {
@@ -172,14 +195,8 @@ impl DiffViewer {
             ChangeTag::Equal => (rgb(0x1e1e1e), rgb(0xd4d4d4), " "),
         };
 
-        let old_ln = line
-            .old_lineno
-            .map(|n| format!("{n}"))
-            .unwrap_or_default();
-        let new_ln = line
-            .new_lineno
-            .map(|n| format!("{n}"))
-            .unwrap_or_default();
+        let old_ln = line.old_lineno.map(|n| format!("{n}")).unwrap_or_default();
+        let new_ln = line.new_lineno.map(|n| format!("{n}")).unwrap_or_default();
 
         div()
             .flex()
@@ -228,11 +245,7 @@ impl DiffViewer {
         });
         let gutter_width = format!("{max_lineno}").len() as f32 * 8.0 + 12.0;
 
-        let header_text = if diff.old_path == diff.new_path {
-            diff.old_path.clone()
-        } else {
-            SharedString::from(format!("{} → {}", diff.old_path, diff.new_path))
-        };
+        let header_text = Self::file_display_name(diff);
 
         let mut content = div().flex().flex_col().w_full();
         for line in &diff.lines {
@@ -256,25 +269,101 @@ impl DiffViewer {
                     .text_color(rgb(0xcccccc))
                     .child(header_text),
             )
+            .child(div().w_full().p(px(4.0)).child(content))
+    }
+
+    fn render_file_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .w(px(220.0))
+            .flex_shrink_0()
+            .h_full()
+            .bg(rgb(0x252526))
+            .border_l_1()
+            .border_color(rgb(0x404040))
             .child(
                 div()
                     .w_full()
-                    .p(px(4.0))
-                    .child(content),
-            )
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .bg(rgb(0x2d2d2d))
+                    .border_b_1()
+                    .border_color(rgb(0x404040))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x999999))
+                    .child(SharedString::from(format!(
+                        "FILES ({})",
+                        self.diffs.len()
+                    ))),
+            );
+
+        for (i, diff) in self.diffs.iter().enumerate() {
+            let is_selected = self.selected_index == Some(i);
+            let name = Self::file_display_name(diff);
+
+            let additions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Insert).count();
+            let deletions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Delete).count();
+
+            let stats = SharedString::from(format!("+{additions} −{deletions}"));
+
+            let bg = if is_selected {
+                rgb(0x37373d)
+            } else {
+                rgb(0x252526)
+            };
+
+            let item = div()
+                .id(ElementId::NamedInteger("file-item".into(), i as u64))
+                .w_full()
+                .px(px(12.0))
+                .py(px(6.0))
+                .bg(bg)
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x2a2d2e)))
+                .on_click(cx.listener(move |this, _event, _window, _cx| {
+                    this.selected_index = Some(i);
+                }))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xcccccc))
+                        .overflow_x_hidden()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(0x888888))
+                        .child(stats),
+                );
+
+            panel = panel.child(item);
+        }
+
+        panel
     }
 }
 
 impl Render for DiffViewer {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let mut container = div().flex().flex_col().w_full();
-        for diff in &self.diffs {
-            container = container.child(self.render_file_diff(diff));
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let diff_content = if let Some(idx) = self.selected_index {
+            if let Some(diff) = self.diffs.get(idx) {
+                self.render_file_diff(diff).into_any_element()
+            } else {
+                div().into_any_element()
+            }
+        } else {
+            div()
+                .p(px(20.0))
+                .text_color(rgb(0x888888))
+                .child("No file selected")
+                .into_any_element()
+        };
 
         div()
             .flex()
-            .flex_col()
+            .flex_row()
             .size_full()
             .bg(rgb(0x1e1e1e))
             .text_color(rgb(0xd4d4d4))
@@ -285,8 +374,9 @@ impl Render for DiffViewer {
                     .id("diff-content")
                     .flex_grow()
                     .overflow_y_scroll()
-                    .child(container),
+                    .child(diff_content),
             )
+            .child(self.render_file_panel(cx))
     }
 }
 

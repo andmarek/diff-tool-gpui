@@ -15,6 +15,7 @@ cargo run
 
 ## GPUI Setup
 
+
 GPUI cannot be used as a simple crates.io dependency. It must be pulled from the Zed git repo with specific `[patch.crates-io]` entries to resolve a `core-graphics` version conflict in `zed-font-kit`.
 
 Required patches in `Cargo.toml`:
