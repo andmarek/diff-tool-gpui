@@ -5,6 +5,7 @@ use gpui::{
 use similar::{ChangeTag, TextDiff};
 use std::env;
 use std::fs;
+use std::process::Command;
 
 #[derive(Clone)]
 struct DiffLine {
@@ -21,13 +22,8 @@ struct FileDiff {
 }
 
 impl FileDiff {
-    fn compute(old_path: &str, new_path: &str) -> Self {
-        let old_content =
-            fs::read_to_string(old_path).unwrap_or_else(|e| format!("Error reading file: {e}"));
-        let new_content =
-            fs::read_to_string(new_path).unwrap_or_else(|e| format!("Error reading file: {e}"));
-
-        let diff = TextDiff::from_lines(&old_content, &new_content);
+    fn from_contents(old_path: &str, new_path: &str, old_content: &str, new_content: &str) -> Self {
+        let diff = TextDiff::from_lines(old_content, new_content);
         let mut lines = Vec::new();
         let mut old_lineno = 0usize;
         let mut new_lineno = 0usize;
@@ -66,6 +62,90 @@ impl FileDiff {
             lines,
         }
     }
+
+    fn from_files(old_path: &str, new_path: &str) -> Self {
+        let old_content =
+            fs::read_to_string(old_path).unwrap_or_else(|e| format!("Error reading file: {e}"));
+        let new_content =
+            fs::read_to_string(new_path).unwrap_or_else(|e| format!("Error reading file: {e}"));
+        Self::from_contents(old_path, new_path, &old_content, &new_content)
+    }
+}
+
+fn git_toplevel() -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_diff_files(staged: bool) -> Result<Vec<FileDiff>, String> {
+    let toplevel = git_toplevel()?;
+
+    let mut args = vec!["diff", "--name-only"];
+    if staged {
+        args.push("--cached");
+    }
+
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(&toplevel)
+        .output()
+        .map_err(|e| format!("Failed to run git diff: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {stderr}"));
+    }
+
+    let file_list = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<&str> = file_list.lines().filter(|l| !l.is_empty()).collect();
+
+    if files.is_empty() {
+        let kind = if staged { "staged" } else { "unstaged" };
+        return Err(format!("No {kind} changes found"));
+    }
+
+    let mut diffs = Vec::new();
+    for file in files {
+        let mut show_args = vec!["show".to_string()];
+        let ref_prefix = if staged { "" } else { "" };
+        show_args.push(format!(":{ref_prefix}{file}"));
+
+        let old_output = Command::new("git")
+            .args(&show_args)
+            .current_dir(&toplevel)
+            .output()
+            .map_err(|e| format!("Failed to get index version of {file}: {e}"))?;
+
+        let old_content = if old_output.status.success() {
+            String::from_utf8_lossy(&old_output.stdout).to_string()
+        } else {
+            String::new()
+        };
+
+        let file_path = format!("{toplevel}/{file}");
+        let new_content = if staged {
+            let staged_output = Command::new("git")
+                .args(["show", &format!(":{file}")])
+                .current_dir(&toplevel)
+                .output()
+                .map_err(|e| format!("Failed to get staged version of {file}: {e}"))?;
+            String::from_utf8_lossy(&staged_output.stdout).to_string()
+        } else {
+            fs::read_to_string(&file_path).unwrap_or_default()
+        };
+
+        diffs.push(FileDiff::from_contents(file, file, &old_content, &new_content));
+    }
+
+    Ok(diffs)
 }
 
 struct DiffViewer {
@@ -73,11 +153,15 @@ struct DiffViewer {
 }
 
 impl DiffViewer {
-    fn new(file_pairs: Vec<(String, String)>) -> Self {
+    fn from_file_pairs(file_pairs: Vec<(String, String)>) -> Self {
         let diffs = file_pairs
             .iter()
-            .map(|(old, new)| FileDiff::compute(old, new))
+            .map(|(old, new)| FileDiff::from_files(old, new))
             .collect();
+        Self { diffs }
+    }
+
+    fn from_diffs(diffs: Vec<FileDiff>) -> Self {
         Self { diffs }
     }
 
@@ -206,19 +290,54 @@ impl Render for DiffViewer {
     }
 }
 
-fn main() {
+enum Mode {
+    FilePairs(Vec<(String, String)>),
+    Git { staged: bool },
+}
+
+fn parse_args() -> Mode {
     let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        eprintln!("Usage:");
+        eprintln!("  gpui-diff-tool --git            Show unstaged git changes");
+        eprintln!("  gpui-diff-tool --git --staged    Show staged git changes");
+        eprintln!("  gpui-diff-tool <old> <new> ...   Diff file pairs");
+        std::process::exit(1);
+    }
+
+    if args.iter().any(|a| a == "--git") {
+        let staged = args.iter().any(|a| a == "--staged");
+        return Mode::Git { staged };
+    }
+
     if args.len() < 3 || args.len() % 2 == 0 {
         eprintln!("Usage: gpui-diff-tool <old-file> <new-file> [<old-file2> <new-file2> ...]");
         std::process::exit(1);
     }
 
-    let mut file_pairs = Vec::new();
+    let mut pairs = Vec::new();
     let mut i = 1;
     while i + 1 < args.len() {
-        file_pairs.push((args[i].clone(), args[i + 1].clone()));
+        pairs.push((args[i].clone(), args[i + 1].clone()));
         i += 2;
     }
+    Mode::FilePairs(pairs)
+}
+
+fn main() {
+    let mode = parse_args();
+
+    let viewer = match mode {
+        Mode::FilePairs(pairs) => DiffViewer::from_file_pairs(pairs),
+        Mode::Git { staged } => match git_diff_files(staged) {
+            Ok(diffs) => DiffViewer::from_diffs(diffs),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        },
+    };
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(900.0), px(700.0)), cx);
@@ -227,7 +346,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| DiffViewer::new(file_pairs.clone())),
+            |_, cx| cx.new(|_| viewer),
         )
         .unwrap();
     });
