@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashSet};
+
 use gpui::{
     div, prelude::*, px, rgb, CursorStyle, ElementId, Pixels, SharedString, Window,
     Context,
@@ -17,6 +19,12 @@ pub enum ViewMode {
     SideBySide,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum PanelMode {
+    List,
+    Tree,
+}
+
 pub struct PanelResizeDrag {
     pub initial_width: Pixels,
 }
@@ -27,11 +35,58 @@ impl Render for PanelResizeDrag {
     }
 }
 
+#[derive(Debug)]
+enum TreeNode {
+    Directory {
+        name: String,
+        children: BTreeMap<String, TreeNode>,
+    },
+    File {
+        diff_index: usize,
+    },
+}
+
+fn insert_into_tree(root: &mut BTreeMap<String, TreeNode>, parts: &[&str], diff_index: usize) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        root.insert(
+            parts[0].to_string(),
+            TreeNode::File { diff_index },
+        );
+        return;
+    }
+    let dir = root
+        .entry(parts[0].to_string())
+        .or_insert_with(|| TreeNode::Directory {
+            name: parts[0].to_string(),
+            children: BTreeMap::new(),
+        });
+    if let TreeNode::Directory { children, .. } = dir {
+        insert_into_tree(children, &parts[1..], diff_index);
+    }
+}
+
+fn build_file_tree(diffs: &[FileDiff]) -> BTreeMap<String, TreeNode> {
+    let mut root: BTreeMap<String, TreeNode> = BTreeMap::new();
+
+    for (i, diff) in diffs.iter().enumerate() {
+        let path = diff.new_path.to_string();
+        let parts: Vec<&str> = path.split('/').collect();
+        insert_into_tree(&mut root, &parts, i);
+    }
+
+    root
+}
+
 pub struct DiffViewer {
     pub diffs: Vec<FileDiff>,
     pub selected_index: Option<usize>,
     pub panel_width: Pixels,
     pub view_mode: ViewMode,
+    pub panel_mode: PanelMode,
+    pub collapsed_dirs: HashSet<String>,
 }
 
 impl DiffViewer {
@@ -46,6 +101,8 @@ impl DiffViewer {
             selected_index: selected,
             panel_width: px(DEFAULT_PANEL_WIDTH),
             view_mode: ViewMode::Unified,
+            panel_mode: PanelMode::List,
+            collapsed_dirs: HashSet::new(),
         }
     }
 
@@ -56,6 +113,8 @@ impl DiffViewer {
             selected_index: selected,
             panel_width: px(DEFAULT_PANEL_WIDTH),
             view_mode: ViewMode::Unified,
+            panel_mode: PanelMode::List,
+            collapsed_dirs: HashSet::new(),
         }
     }
 
@@ -331,7 +390,173 @@ impl DiffViewer {
             )
     }
 
+    fn render_file_item(&self, i: usize, diff: &FileDiff, indent: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_selected = self.selected_index == Some(i);
+        let name = match self.panel_mode {
+            PanelMode::List => Self::file_display_name(diff),
+            PanelMode::Tree => {
+                let path = diff.new_path.to_string();
+                SharedString::from(
+                    path.rsplit('/').next().unwrap_or(&path).to_string(),
+                )
+            }
+        };
+
+        let additions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Insert).count();
+        let deletions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Delete).count();
+        let stats = SharedString::from(format!("+{additions} −{deletions}"));
+
+        let bg = if is_selected {
+            rgb(0x37373d)
+        } else {
+            rgb(0x252526)
+        };
+
+        div()
+            .id(ElementId::NamedInteger("file-item".into(), i as u64))
+            .w_full()
+            .pl(px(12.0 + indent))
+            .pr(px(12.0))
+            .py(px(4.0))
+            .bg(bg)
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(0x2a2d2e)))
+            .on_click(cx.listener(move |this, _event, _window, _cx| {
+                this.selected_index = Some(i);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x888888))
+                            .child("📄"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xcccccc))
+                            .overflow_x_hidden()
+                            .child(name),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x888888))
+                    .pl(px(18.0))
+                    .child(stats),
+            )
+    }
+
+    fn render_tree_nodes(
+        &self,
+        nodes: &BTreeMap<String, TreeNode>,
+        parent_path: &str,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut elements: Vec<gpui::AnyElement> = Vec::new();
+        let indent = depth as f32 * 16.0;
+
+        let mut dirs: Vec<(&String, &TreeNode)> = Vec::new();
+        let mut files: Vec<(&String, &TreeNode)> = Vec::new();
+
+        for (key, node) in nodes {
+            match node {
+                TreeNode::Directory { .. } => dirs.push((key, node)),
+                TreeNode::File { .. } => files.push((key, node)),
+            }
+        }
+
+        for (_key, node) in &dirs {
+            if let TreeNode::Directory { name, children } = node {
+                let dir_path = if parent_path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{parent_path}/{name}")
+                };
+
+                let is_collapsed = self.collapsed_dirs.contains(&dir_path);
+                let arrow = if is_collapsed { "▶" } else { "▼" };
+                let dir_path_clone = dir_path.clone();
+
+                let dir_header = div()
+                    .id(ElementId::Name(SharedString::from(format!("dir-{dir_path}"))))
+                    .w_full()
+                    .pl(px(12.0 + indent))
+                    .pr(px(12.0))
+                    .py(px(4.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0x2a2d2e)))
+                    .on_click(cx.listener(move |this, _event, _window, _cx| {
+                        if this.collapsed_dirs.contains(&dir_path_clone) {
+                            this.collapsed_dirs.remove(&dir_path_clone);
+                        } else {
+                            this.collapsed_dirs.insert(dir_path_clone.clone());
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x888888))
+                                    .w(px(10.0))
+                                    .child(arrow),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x888888))
+                                    .child("📁"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xcccccc))
+                                    .child(SharedString::from(name.clone())),
+                            ),
+                    );
+
+                elements.push(dir_header.into_any_element());
+
+                if !is_collapsed {
+                    let child_elements =
+                        self.render_tree_nodes(children, &dir_path, depth + 1, cx);
+                    elements.extend(child_elements);
+                }
+            }
+        }
+
+        for (_key, node) in &files {
+            if let TreeNode::File { diff_index, .. } = node {
+                let diff = &self.diffs[*diff_index];
+                elements.push(
+                    self.render_file_item(*diff_index, diff, indent, cx)
+                        .into_any_element(),
+                );
+            }
+        }
+
+        elements
+    }
+
     fn render_file_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let list_active = self.panel_mode == PanelMode::List;
+        let tree_active = self.panel_mode == PanelMode::Tree;
+
+        let list_bg = if list_active { rgb(0x007acc) } else { rgb(0x3c3c3c) };
+        let tree_bg = if tree_active { rgb(0x007acc) } else { rgb(0x3c3c3c) };
+
         let mut panel = div()
             .flex()
             .flex_col()
@@ -344,60 +569,75 @@ impl DiffViewer {
             .child(
                 div()
                     .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
                     .px(px(12.0))
-                    .py(px(8.0))
+                    .py(px(6.0))
                     .bg(rgb(0x2d2d2d))
                     .border_b_1()
                     .border_color(rgb(0x404040))
-                    .text_size(px(11.0))
-                    .text_color(rgb(0x999999))
-                    .child(SharedString::from(format!(
-                        "FILES ({})",
-                        self.diffs.len()
-                    ))),
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x999999))
+                            .child(SharedString::from(format!(
+                                "FILES ({})",
+                                self.diffs.len()
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .id("btn-list-view")
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .bg(list_bg)
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0xffffff))
+                                    .child("List")
+                                    .on_click(cx.listener(|this, _event, _window, _cx| {
+                                        this.panel_mode = PanelMode::List;
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("btn-tree-view")
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .bg(tree_bg)
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0xffffff))
+                                    .child("Tree")
+                                    .on_click(cx.listener(|this, _event, _window, _cx| {
+                                        this.panel_mode = PanelMode::Tree;
+                                    })),
+                            ),
+                    ),
             );
 
-        for (i, diff) in self.diffs.iter().enumerate() {
-            let is_selected = self.selected_index == Some(i);
-            let name = Self::file_display_name(diff);
-
-            let additions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Insert).count();
-            let deletions = diff.lines.iter().filter(|l| l.tag == ChangeTag::Delete).count();
-
-            let stats = SharedString::from(format!("+{additions} −{deletions}"));
-
-            let bg = if is_selected {
-                rgb(0x37373d)
-            } else {
-                rgb(0x252526)
-            };
-
-            let item = div()
-                .id(ElementId::NamedInteger("file-item".into(), i as u64))
-                .w_full()
-                .px(px(12.0))
-                .py(px(6.0))
-                .bg(bg)
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(0x2a2d2e)))
-                .on_click(cx.listener(move |this, _event, _window, _cx| {
-                    this.selected_index = Some(i);
-                }))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xcccccc))
-                        .overflow_x_hidden()
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(0x888888))
-                        .child(stats),
-                );
-
-            panel = panel.child(item);
+        match self.panel_mode {
+            PanelMode::List => {
+                for (i, diff) in self.diffs.iter().enumerate() {
+                    panel = panel.child(self.render_file_item(i, diff, 0.0, cx));
+                }
+            }
+            PanelMode::Tree => {
+                let tree = build_file_tree(&self.diffs);
+                let elements = self.render_tree_nodes(&tree, "", 0, cx);
+                for el in elements {
+                    panel = panel.child(el);
+                }
+            }
         }
 
         panel
